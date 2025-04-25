@@ -8,8 +8,129 @@ from PIL import Image, ImageDraw
 import pystray
 import argparse
 from datetime import datetime
+import tempfile
+import atexit
 
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
+
+# Single instance implementation with file lock for better reliability
+class SingleInstanceChecker:
+    """Ensures only one instance of the application runs at a time using file locking."""
+    
+    def __init__(self, unique_id="inveni_file_manager_lock"):
+        """Initialize with a unique ID for this application."""
+        self.unique_id = unique_id
+        self.lockfile = os.path.join(tempfile.gettempdir(), f"{self.unique_id}.lock")
+        self.lockfd = None
+        
+    def is_another_instance_running(self):
+        """Check if another instance is already running using file locking."""
+        try:
+            # If lock file exists but is stale (contains a PID that no longer exists)
+            if os.path.exists(self.lockfile):
+                with open(self.lockfile, 'r') as f:
+                    old_pid = f.read().strip()
+                    try:
+                        # Check if process with this PID exists
+                        old_pid = int(old_pid)
+                        # Windows-specific process check
+                        if sys.platform == 'win32':
+                            import ctypes
+                            kernel32 = ctypes.windll.kernel32
+                            handle = kernel32.OpenProcess(1, 0, old_pid)
+                            if handle == 0:
+                                # Process doesn't exist, remove stale lock
+                                os.remove(self.lockfile)
+                            else:
+                                kernel32.CloseHandle(handle)
+                                # Try to signal the other instance
+                                self._signal_existing_instance()
+                                return True
+                        # Unix process check
+                        else:
+                            import signal
+                            os.kill(old_pid, 0)  # This raises OSError if process doesn't exist
+                            # Process exists, try to signal it
+                            self._signal_existing_instance()
+                            return True
+                    except (ValueError, OSError):
+                        # Invalid PID or process doesn't exist, remove stale lock
+                        os.remove(self.lockfile)
+            
+            # Create lock file with current PID
+            with open(self.lockfile, 'w') as f:
+                f.write(str(os.getpid()))
+            
+            # Register cleanup on exit
+            atexit.register(self._cleanup)
+            
+            # Successfully created lock, no other instance is running
+            return False
+            
+        except Exception as e:
+            print(f"Error in single instance check: {e}")
+            # In case of error, assume no other instance is running
+            return False
+    
+    def _signal_existing_instance(self):
+        """Signal the existing instance to show its window."""
+        try:
+            # Create signal file
+            signal_file = os.path.join(tempfile.gettempdir(), f"{self.unique_id}.signal")
+            with open(signal_file, 'w') as f:
+                f.write(f"SHOW_WINDOW|{os.getpid()}|{time.time()}")
+            print(f"Signal file created at: {signal_file}")
+            return True
+        except Exception as e:
+            print(f"Error signaling existing instance: {e}")
+            return False
+    
+    def _cleanup(self):
+        """Clean up the lock file on exit."""
+        try:
+            if os.path.exists(self.lockfile):
+                os.remove(self.lockfile)
+        except:
+            pass
+    
+    def check_for_signals(self, show_callback):
+        """Check for signals from other instances periodically."""
+        signal_file = os.path.join(tempfile.gettempdir(), f"{self.unique_id}.signal")
+        
+        def check_signal_thread():
+            last_modified = 0
+            while True:
+                try:
+                    if os.path.exists(signal_file):
+                        # Get file modification time
+                        mod_time = os.path.getmtime(signal_file)
+                        if mod_time > last_modified:
+                            # Signal file was recently modified
+                            last_modified = mod_time
+                            
+                            # Check signal content
+                            with open(signal_file, 'r') as f:
+                                signal_data = f.read().strip()
+                            
+                            # Process signal
+                            parts = signal_data.split('|')
+                            if len(parts) >= 1 and parts[0] == "SHOW_WINDOW":
+                                print("Received show window signal")
+                                if show_callback:
+                                    # Call in main thread
+                                    if hasattr(show_callback, '__self__') and hasattr(show_callback.__self__, 'after'):
+                                        show_callback.__self__.after(0, show_callback)
+                                    else:
+                                        show_callback()
+                except Exception as e:
+                    print(f"Error checking for signals: {e}")
+                finally:
+                    # Check every second
+                    time.sleep(1)
+        
+        # Start signal checking in background thread
+        signal_thread = threading.Thread(target=check_signal_thread, daemon=True)
+        signal_thread.start()
 
 # Add resource path function for PyInstaller compatibility
 def resource_path(relative_path):
@@ -42,6 +163,7 @@ from utils.type_handler import FileTypeHandler
 ICON_MAIN = resource_path(os.path.join("resources", "icons", "inveni_icon.ico"))
 ICON_TASKBAR = resource_path(os.path.join("resources", "icons", "inveni_icon.ico"))
 ICON_TRAY = resource_path(os.path.join("resources", "icons", "inveni_icon.ico"))
+ICON_DIALOG = resource_path(os.path.join("resources", "icons", "inveni_icon.ico")) 
 
 # Helper for timestamp formatting
 def get_timestamp_str():
@@ -111,6 +233,8 @@ class InveniApp:
         # Initialize core components
         self.settings_manager = SettingsManager()
         self.shared_state = SharedState()
+
+        self.shared_state.app_icon_path = ICON_DIALOG
         
         # Add methods to SharedState for system tray updates
         def notify_system_tray_update(status):
@@ -605,10 +729,23 @@ def main():
         # Display current time and username information
         current_time = get_formatted_time(use_utc=True)
         current_username = get_current_username()
-        print(f"Inveni File Version Manager: {current_time}")
+        print(f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {current_time}")
         print(f"Current User's Login: {current_username}")
         
+        # Check if another instance is already running
+        instance_checker = SingleInstanceChecker()
+        if instance_checker.is_another_instance_running():
+            print("Inveni is already running. Focusing the existing window...")
+            # Exit this instance immediately
+            return
+        
+        # Create and run app normally if no other instance is running
         app = InveniApp()
+        
+        # Set up signal checking for window focus
+        instance_checker.check_for_signals(app.show_window)
+        
+        # Run the application
         app.run()
     except Exception as e:
         error_msg = f"Application error: {str(e)}"
