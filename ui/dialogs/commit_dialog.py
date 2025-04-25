@@ -4,7 +4,8 @@ from datetime import datetime
 from utils.time_utils import get_current_times, get_current_username
 
 class QuickCommitDialog:
-    def __init__(self, file_path, settings, shared_state, version_manager, backup_manager, colors=None, ui_scale=1.0, font_scale=1.0):
+    def __init__(self, file_path, settings, shared_state, version_manager, backup_manager, 
+                 colors=None, ui_scale=1.0, font_scale=1.0, icon_path="resources/icons/inveni_icon.ico"):
         """Streamlined commit dialog with clickable last commit display."""
         self.file_path = file_path
         self.settings = settings
@@ -51,6 +52,49 @@ class QuickCommitDialog:
         self.root.minsize(350, 200)
         self.root.resizable(True, True)
         self.root.configure(bg=self.colors['background'])
+        
+        # Icon handling - start with passed icon_path
+        self.icon_path = icon_path
+        
+        # Try shared_state first if available
+        try:
+            if hasattr(self.shared_state, 'app_icon_path') and self.shared_state.app_icon_path:
+                if os.path.exists(self.shared_state.app_icon_path):
+                    self.icon_path = self.shared_state.app_icon_path
+        except Exception as e:
+            print(f"Could not get icon from shared state: {e}")
+        
+        # Then try settings if icon_path not valid
+        if not self.icon_path or not os.path.exists(self.icon_path):
+            if settings:
+                settings_icon = settings.get("app_icon", None)
+                if settings_icon and os.path.exists(settings_icon):
+                    self.icon_path = settings_icon
+        
+        # Finally, try standard locations if still not found
+        if not self.icon_path or not os.path.exists(self.icon_path):
+            possible_icon_paths = [
+                "resources/icons/inveni_icon.ico",
+                "resources/images/inveni_icon.ico",
+                "resources/icons/app_icon.ico",
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "../resources/icons/inveni_icon.ico")
+            ]
+            for path in possible_icon_paths:
+                if os.path.exists(path):
+                    self.icon_path = path
+                    break
+        
+        # Apply icon if found
+        if self.icon_path and os.path.exists(self.icon_path):
+            try:
+                self.root.iconbitmap(self.icon_path)
+            except tk.TclError:
+                # If iconbitmap fails, try iconphoto for Linux/macOS
+                try:
+                    icon = tk.PhotoImage(file=self.icon_path)
+                    self.root.iconphoto(True, icon)
+                except Exception as e:
+                    print(f"Could not set icon using alternative method: {e}")
         
         # Card container
         self.card_frame = tk.Frame(
@@ -175,6 +219,9 @@ class QuickCommitDialog:
         self.message_entry.pack(fill="x", padx=self.std_padding, pady=self.std_padding)
         self.message_entry.focus_set()
         
+        # Explicitly bind Enter key to commit directly on entry
+        self.message_entry.bind("<Return>", lambda e: self.save())
+        
         # Error message area (initially empty)
         self.error_label = tk.Label(
             self.main_frame,
@@ -217,13 +264,24 @@ class QuickCommitDialog:
         
         status_label = tk.Label(
             status_frame,
-            text=f"User: {self.username} | Time: {self.times['local'].strftime('%Y-%m-%d %H:%M:%S')}",
+            text=None,
             font=("Segoe UI", int(8 * self.font_scale)),
             fg=self.colors['secondary'],
             bg=self.colors['card'],
             anchor="w"
         )
         status_label.pack(side="left")
+        
+        # Add keyboard shortcut hints
+        shortcut_label = tk.Label(
+            status_frame,
+            text=None,
+            font=("Segoe UI", int(8 * self.font_scale)),
+            fg=self.colors['secondary'],
+            bg=self.colors['card'],
+            anchor="e"
+        )
+        shortcut_label.pack(side="right")
         
         # Update UI layout
         self.root.update_idletasks()
@@ -240,7 +298,7 @@ class QuickCommitDialog:
         self.root.grab_set()
         self.root.focus_force()
         
-        # Bind keys
+        # Bind keys at window level
         self.root.bind("<Return>", lambda e: self.save())
         self.root.bind("<Escape>", lambda e: self.cancel())
         
@@ -291,6 +349,7 @@ class QuickCommitDialog:
             tracked_files = self.version_manager.load_tracked_files()
             normalized_path = os.path.normpath(self.file_path)
             
+            # Try with standard path
             if normalized_path in tracked_files:
                 versions = tracked_files[normalized_path].get("versions", {})
                 if versions:
@@ -307,8 +366,27 @@ class QuickCommitDialog:
                     if latest_version:
                         return latest_version.get("commit_message", "")
             
+            # Try with alternate path format (Unix/Windows path differences)
+            alt_path = normalized_path.replace('\\', '/')
+            if alt_path in tracked_files:
+                versions = tracked_files[alt_path].get("versions", {})
+                if versions:
+                    # Find the latest version
+                    latest_version = None
+                    latest_timestamp = None
+                    
+                    for version_hash, info in versions.items():
+                        timestamp = info.get("timestamp", "")
+                        if not latest_timestamp or timestamp > latest_timestamp:
+                            latest_timestamp = timestamp
+                            latest_version = info
+                    
+                    if latest_version:
+                        return latest_version.get("commit_message", "")
+                        
             return None
-        except Exception:
+        except Exception as e:
+            print(f"Error getting last commit: {e}")
             return None
     
     def _use_last_commit(self):
@@ -317,6 +395,8 @@ class QuickCommitDialog:
             self.message_entry.delete(0, tk.END)
             self.message_entry.insert(0, self.last_commit)
             self.message_entry.focus_set()
+            # Move cursor to end of text
+            self.message_entry.icursor(tk.END)
     
     def center_window(self, width, height):
         """Center the window on screen with dynamic size."""
@@ -405,8 +485,11 @@ class QuickCommitDialog:
                 if hasattr(self.shared_state.file_monitor, 'update_after_commit'):
                     self.shared_state.file_monitor.update_after_commit(self.file_path, current_hash)
             
-            # Notify about version change - CHANGED to update system tray menu
+            # Notify about version change
             self.shared_state.notify_version_commit()
+            # Also call the old notification method if it exists for backward compatibility
+            if hasattr(self.shared_state, 'notify_version_change'):
+                self.shared_state.notify_version_change()
             
             # Success
             self.result = True
