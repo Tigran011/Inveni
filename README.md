@@ -95,8 +95,8 @@ This means you are free to use, modify, and distribute the software, provided yo
 
 ## Support
 
-For support, feature requests, or bug reports, please open an issue on the [GitHub Repository](https://github.com/Tigran011/Inveni/issues).
-Or write me [tigranv001@gmail.com].
+For support, feature requests, or bug reports, please open an issue on the [GitHub Repository](https://github.com/Tigran011/Inveni/issues).<br>
+[tigranv001@gmail.com].
 
 ---
 
