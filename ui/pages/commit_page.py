@@ -131,6 +131,10 @@ class CommitPage:
         # Register callbacks for file changes
         self.shared_state.add_file_callback(self._on_file_updated)
         self.shared_state.add_monitoring_callback(self._on_file_changed)
+        
+        # Register for commit notifications
+        if hasattr(shared_state, 'add_version_commit_callback'):
+            shared_state.add_version_commit_callback(self.refresh_last_commit)
 
     def _create_ui(self):
         """Create the user interface with responsive grid layout."""
@@ -363,6 +367,19 @@ class CommitPage:
             last_commit_text.pack(fill="x", padx=self.STANDARD_PADDING, pady=(0, self.SMALL_PADDING))
             # Bind click event to the text too
             last_commit_text.bind("<Button-1>", lambda e: self._use_last_commit())
+            
+            # Add refresh button
+            refresh_btn = tk.Button(
+                self.last_commit_frame,
+                text="🔄",
+                font=("Segoe UI", int(8 * self.font_scale)),
+                bg=self.colors['white'],
+                fg=self.colors['secondary'],
+                relief="flat",
+                cursor="hand2",
+                command=self.refresh_last_commit
+            )
+            refresh_btn.pack(side="right", padx=self.STANDARD_PADDING)
         
         # Commit message label
         self.commit_label = tk.Label(
@@ -625,8 +642,12 @@ class CommitPage:
                 
             # Get tracked files
             tracked_files = self.version_manager.load_tracked_files()
+            if not tracked_files:
+                return None
+                
             normalized_path = os.path.normpath(self.selected_file)
             
+            # Try with standard path format
             if normalized_path in tracked_files:
                 versions = tracked_files[normalized_path].get("versions", {})
                 if versions:
@@ -642,10 +663,42 @@ class CommitPage:
                     
                     if latest_version:
                         return latest_version.get("commit_message", "")
+                        
+            # Try with alternate path format (Windows/Unix path differences)
+            alt_path = normalized_path.replace('\\', '/')
+            if alt_path in tracked_files:
+                versions = tracked_files[alt_path].get("versions", {})
+                if versions:
+                    latest_version = None
+                    latest_timestamp = None
+                    
+                    for version_hash, info in versions.items():
+                        timestamp = info.get("timestamp", "")
+                        if not latest_timestamp or timestamp > latest_timestamp:
+                            latest_timestamp = timestamp
+                            latest_version = info
+                    
+                    if latest_version:
+                        return latest_version.get("commit_message", "")
             
             return None
-        except Exception:
+        except Exception as e:
+            print(f"Error getting last commit: {e}")
             return None
+    
+    def refresh_last_commit(self):
+        """Refresh the last commit display - can be called externally."""
+        try:
+            # Get fresh last commit
+            old_commit = self.last_commit
+            self.last_commit = self._get_last_commit()
+            
+            # Only update UI if the commit has changed
+            if self.last_commit != old_commit:
+                print(f"Refreshing last commit: '{old_commit}' -> '{self.last_commit}'")
+                self._update_last_commit_display()
+        except Exception as e:
+            print(f"Error refreshing last commit: {e}")
     
     def _use_last_commit(self):
         """Use the last commit message when clicked."""
@@ -724,12 +777,26 @@ class CommitPage:
 
     def _update_last_commit_display(self):
         """Update the last commit display section."""
-        # Remove existing last commit frame if it exists
-        if self.last_commit_frame and self.last_commit_frame.winfo_exists():
-            self.last_commit_frame.destroy()
-            self.last_commit_frame = None
+        # Handle the case when last_commit_frame doesn't exist or has been destroyed
+        if hasattr(self, 'last_commit_frame') and self.last_commit_frame:
+            try:
+                if self.last_commit_frame.winfo_exists():
+                    self.last_commit_frame.destroy()
+            except:
+                pass  # Handle case where widget reference is invalid
         
-        if self.last_commit:
+        self.last_commit_frame = None
+        
+        # Only proceed if we have a commit message
+        if not self.last_commit or not hasattr(self, 'commit_section') or not self.commit_section.winfo_exists():
+            return
+            
+        try:
+            # Get all children to determine proper placement
+            children = self.commit_section.winfo_children()
+            placement_index = 2  # Default after title and separator
+            
+            # Create new frame
             self.last_commit_frame = tk.Frame(
                 self.commit_section, 
                 bg=self.colors['white'],
@@ -739,11 +806,17 @@ class CommitPage:
                 highlightthickness=1,
                 cursor="hand2"  # Hand cursor to indicate clickability
             )
-            self.last_commit_frame.pack(fill="x", padx=self.STANDARD_PADDING, pady=self.SMALL_PADDING)
+            
+            # Make sure to insert at the right position (after the section title and separator)
+            if len(children) >= placement_index:
+                self.last_commit_frame.pack(fill="x", padx=self.STANDARD_PADDING, pady=self.SMALL_PADDING, after=children[placement_index-1])
+            else:
+                self.last_commit_frame.pack(fill="x", padx=self.STANDARD_PADDING, pady=self.SMALL_PADDING)
             
             # Bind click event to the frame
             self.last_commit_frame.bind("<Button-1>", lambda e: self._use_last_commit())
             
+            # Label and text must be created after frame is packed to avoid layout issues
             last_commit_label = tk.Label(
                 self.last_commit_frame,
                 text="Last commit (click to use):",
@@ -754,7 +827,6 @@ class CommitPage:
                 cursor="hand2"  # Hand cursor to indicate clickability
             )
             last_commit_label.pack(fill="x", padx=self.STANDARD_PADDING, pady=(self.SMALL_PADDING, 0))
-            # Bind click event to the label too
             last_commit_label.bind("<Button-1>", lambda e: self._use_last_commit())
             
             last_commit_text = tk.Label(
@@ -769,8 +841,25 @@ class CommitPage:
                 cursor="hand2"  # Hand cursor to indicate clickability
             )
             last_commit_text.pack(fill="x", padx=self.STANDARD_PADDING, pady=(0, self.SMALL_PADDING))
-            # Bind click event to the text too
             last_commit_text.bind("<Button-1>", lambda e: self._use_last_commit())
+            
+            # Add refresh button
+            refresh_btn = tk.Button(
+                self.last_commit_frame,
+                text="🔄",
+                font=("Segoe UI", int(8 * self.font_scale)),
+                bg=self.colors['white'],
+                fg=self.colors['secondary'],
+                relief="flat",
+                cursor="hand2",
+                command=self.refresh_last_commit
+            )
+            refresh_btn.pack(side="right", padx=self.STANDARD_PADDING)
+            
+            # Force update to ensure proper layout
+            self.commit_section.update_idletasks()
+        except Exception as e:
+            print(f"Error updating last commit display: {e}")
 
     def _on_file_changed(self, file_path: str, has_changes: bool) -> None:
         """Handle file change detection."""
@@ -1050,8 +1139,11 @@ class CommitPage:
             # Clear entry and update
             self.commit_message_entry.delete(0, tk.END)
             
-            # CHANGED: Use notify_version_commit instead of notify_version_change to refresh system tray
+            # IMPORTANT: Notify both notification systems to ensure all UI components update
             self.shared_state.notify_version_commit()
+            # Also call the old notification method if it exists for backward compatibility
+            if hasattr(self.shared_state, 'notify_version_change'):
+                self.shared_state.notify_version_change()
             
             if self.shared_state.file_monitor:
                 self.shared_state.file_monitor.refresh_tracked_files()
@@ -1060,10 +1152,12 @@ class CommitPage:
             self._hide_progress_indicator()
             self._show_feedback("Changes committed successfully!", success=True)
             
-            # Update UI
+            # Store the last commit message before updating UI
             self.last_commit = commit_message
-            self._update_last_commit_display()
-            self._update_metadata_display()
+            
+            # Safely update UI with small delays to ensure proper sequence
+            self.parent.after(100, self._update_last_commit_display)
+            self.parent.after(200, self._update_metadata_display)
             
         except Exception as e:
             error_msg = str(e)
@@ -1273,6 +1367,10 @@ class CommitPage:
             if hasattr(self.shared_state, 'remove_callback'):
                 self.shared_state.remove_callback(self._on_file_updated)
                 self.shared_state.remove_callback(self._on_file_changed)
+            
+            # Remove commit callback
+            if hasattr(self.shared_state, 'remove_version_commit_callback'):
+                self.shared_state.remove_version_commit_callback(self.refresh_last_commit)
         except Exception as e:
             print(f"Error during callback cleanup: {e}")
         
